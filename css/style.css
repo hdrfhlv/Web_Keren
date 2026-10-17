@@ -412,3 +412,9 @@ footer{
 .footer-center p{
   margin:5px 0;
 }
+
+.footer-right {
+  text-align: right;
+  text-align: end;
+  color: white;
+}
