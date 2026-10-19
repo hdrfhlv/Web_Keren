@@ -291,14 +291,34 @@
         </div>
 
         <div class="contact-box">
-          <form>
-            <input type="text" placeholder="Your Name" />
+          <form id="contact-form" data-api-url="http://127.0.0.1:5000/api/contact">
+            <input
+              type="text"
+              name="name"
+              placeholder="Your Name"
+              autocomplete="name"
+              maxlength="100"
+              required
+            />
 
-            <input type="email" placeholder="Your Email" />
+            <input
+              type="email"
+              name="email"
+              placeholder="Your Email"
+              autocomplete="email"
+              maxlength="254"
+              required
+            />
 
-            <textarea placeholder="Your Message"></textarea>
+            <textarea
+              name="message"
+              placeholder="Your Message"
+              maxlength="5000"
+              required
+            ></textarea>
 
-            <button class="btn">Send Message</button>
+            <button class="btn" type="submit">Send Message</button>
+            <p id="contact-status" role="status" aria-live="polite"></p>
           </form>
         </div>
       </div>
