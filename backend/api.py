@@ -1,25 +1,66 @@
+import base64
 import os
-import smtplib
-from email.message import EmailMessage
 from email.headerregistry import Address
+from email.message import EmailMessage
+from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from google.auth.exceptions import GoogleAuthError
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from httplib2 import HttpLib2Error
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+BASE_DIR = Path(__file__).resolve().parent
+TOKEN_FILE = BASE_DIR / "token.json"
+CREDENTIALS_FILE = BASE_DIR.parent / "Oauth.json"
+SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+
+load_dotenv(BASE_DIR / ".env")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 
-CORS(app, resources={
-    r"/api/*": {
-        "origins": [
-            "http://127.0.0.1:5500",
-            "http://localhost:5500",
-        ]
-    }
-})
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": [
+                "http://127.0.0.1:5500",
+                "http://localhost:5500",
+            ]
+        }
+    },
+)
+
+
+def create_gmail_service():
+    if not CREDENTIALS_FILE.is_file():
+        raise FileNotFoundError(
+            f"OAuth client credentials not found: {CREDENTIALS_FILE.name}"
+        )
+    if not TOKEN_FILE.is_file():
+        raise FileNotFoundError(
+            f"Gmail OAuth token not found: {TOKEN_FILE.name}"
+        )
+
+    credentials = Credentials.from_authorized_user_file(
+        str(TOKEN_FILE),
+        SCOPES,
+    )
+    if credentials.expired:
+        if not credentials.refresh_token:
+            raise ValueError("OAuth token cannot be refreshed.")
+        credentials.refresh(Request())
+        TOKEN_FILE.write_text(credentials.to_json(), encoding="utf-8")
+
+    if not credentials.valid:
+        raise ValueError("Gmail OAuth credentials are invalid.")
+
+    return build("gmail", "v1", credentials=credentials, cache_discovery=False)
 
 
 @app.post("/api/contact")
@@ -41,13 +82,10 @@ def contact():
     sender = sender.strip()
     message = message.strip()
     try:
-        Address(addr_spec=sender)
-        valid_sender = (
-            len(sender) <= 254
-            and "\n" not in sender
-            and "\r" not in sender
-        )
+        sender_address = Address(addr_spec=sender)
+        valid_sender = len(sender) <= 254
     except ValueError:
+        sender_address = None
         valid_sender = False
 
     if (
@@ -62,33 +100,46 @@ def contact():
         return jsonify(error="Periksa kembali isi formulir."), 400
 
     gmail_address = os.environ.get("GMAIL_ADDRESS", "").strip()
-    gmail_password = os.environ.get("GMAIL_PASSWORD", "").replace(" ", "")
     contact_email = os.environ.get("CONTACT_EMAIL", "").strip()
-    if not all((gmail_address, gmail_password, contact_email)):
-        app.logger.error("Konfigurasi Gmail belum lengkap di backend/.env")
-        return jsonify(error="Server email belum dikonfigurasi."), 503
+    if not gmail_address or not contact_email:
+        app.logger.error(
+            "GMAIL_ADDRESS dan CONTACT_EMAIL harus dikonfigurasi di backend/.env"
+        )
+        return jsonify(error="Konfigurasi alamat email server belum lengkap."), 503
 
     try:
-        gmail_from = Address(addr_spec=gmail_address)
+        sender_identity = Address(addr_spec=gmail_address)
         recipient = Address(addr_spec=contact_email)
     except ValueError:
-        app.logger.error("Alamat email di konfigurasi backend tidak valid")
-        return jsonify(error="Konfigurasi alamat email server tidak valid."), 503
+        app.logger.error("Alamat email pada konfigurasi backend tidak valid")
+        return jsonify(error="Alamat email server tidak valid."), 503
 
     email = EmailMessage()
+    email["From"] = sender_identity
     email["Subject"] = f"Pesan dari website: {name}"
-    email["From"] = gmail_from
     email["To"] = recipient
-    email["Reply-To"] = sender
+    email["Reply-To"] = sender_address
     email.set_content(f"Nama: {name}\nEmail: {sender}\n\n{message}")
+    raw_message = base64.urlsafe_b64encode(email.as_bytes()).decode("ascii")
 
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as smtp:
-            smtp.starttls()
-            smtp.login(gmail_address, gmail_password)
-            smtp.send_message(email)
-    except (OSError, smtplib.SMTPException):
-        app.logger.exception("Gagal mengirim pesan kontak")
+        service = create_gmail_service()
+    except FileNotFoundError:
+        app.logger.exception("File konfigurasi OAuth Gmail belum tersedia")
+        return jsonify(error="Server email belum diotorisasi. Ikuti panduan setup Gmail API."), 503
+    except (GoogleAuthError, OSError, ValueError):
+        app.logger.exception("Gagal memuat kredensial OAuth Gmail")
+        return jsonify(error="Autentikasi Gmail gagal. Otorisasi ulang akun email."), 503
+
+    try:
+        (
+            service.users()
+            .messages()
+            .send(userId="me", body={"raw": raw_message})
+            .execute()
+        )
+    except (HttpError, HttpLib2Error, OSError):
+        app.logger.exception("Gmail API gagal mengirim pesan kontak")
         return jsonify(error="Pesan belum berhasil dikirim. Coba lagi nanti."), 502
 
     return jsonify(message="Pesan berhasil dikirim.")
